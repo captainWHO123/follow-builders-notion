@@ -1,0 +1,13 @@
+{
+  "name": "follow-builders-notion",
+  "version": "1.0.0",
+  "description": "Follow Builders Daily Digest - Auto-generate and sync to Notion",
+  "main": "generate-digest.js",
+  "scripts": {
+    "start": "node generate-digest.js",
+    "test": "node generate-digest.js"
+  },
+  "keywords": ["notion", "ai", "digest", "follow-builders"],
+  "author": "Zen",
+  "license": "MIT"
+}

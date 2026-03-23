@@ -1,0 +1,41 @@
+name: Follow Builders Daily Digest
+
+on:
+  schedule:
+    # 北京时间每天早上 9:00 (UTC 1:00)
+    - cron: '0 1 * * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  generate-digest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Generate digest
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+        run: node generate-digest-v2.js
+
+      - name: Report success
+        if: success()
+        run: |
+          echo "✅ Digest generated successfully!"
+          echo "📅 Date: $(date +'%Y-%m-%d')"
+          echo "⏰ Time: $(date +'%H:%M:%S UTC')"
+
+      - name: Report failure
+        if: failure()
+        run: |
+          echo "❌ Failed to generate digest"
+          exit 1
