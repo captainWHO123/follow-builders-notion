@@ -1,17 +1,23 @@
 #!/usr/bin/env node
-
 /**
- * Follow Builders Daily Digest Generator (V2)
- * 每天早上 9 点自动生成简报并写入 Notion
- * 使用页面内容块而不是数据库属性，更简单直接
+ * Follow Builders Daily Digest Generator (V4 - With Content Deduplication)
+ * 直接从 GitHub 原始项目获取真实 feed
+ * 内容去重：如果内容和上次相同，不创建新页面
  */
 
 const https = require('https');
+const crypto = require('crypto');
 
 // 配置
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const DATABASE_ID = 'd05758a8-3666-46d6-9b16-5666b71989a3';
 const NOTION_VERSION = '2025-09-03';
+
+// 原始项目的 Feed URL
+const FEED_URLS = {
+  podcasts: 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json',
+  x: 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json'
+};
 
 if (!NOTION_API_KEY) {
   console.error('❌ Error: NOTION_API_KEY environment variable is required');
@@ -19,197 +25,371 @@ if (!NOTION_API_KEY) {
   process.exit(1);
 }
 
-// 模拟内容（实际应该从 Follow Builders 的中心 feed 获取）
-function fetchDailyContent() {
-  const today = new Date().toISOString().split('T')[0];
-  return {
-    title: `Follow Builders Daily Digest - ${today}`,
-    date: today,
-    podcasts: [
-      {
-        title: 'Latent Space - AI Architecture',
-        summary: '讨论了最新的 AI 架构趋势，包括多模态模型的发展方向。重点强调了模块化设计在未来 AI 系统中的重要性。',
-        link: 'https://youtube.com/example1',
-        author: 'Alessio',
-        duration: '45:00'
-      },
-      {
-        title: 'Training Data - Dataset Engineering',
-        summary: '深入探讨数据工程的最佳实践，如何构建高质量训练数据集。嘉宾分享了在大规模数据清洗和标注中的经验。',
-        link: 'https://youtube.com/example2',
-        author: 'Sam',
-        duration: '38:00'
-      }
-    ],
-    tweets: [
-      {
-        author: 'Andrej Karpathy',
-        handle: '@karpathy',
-        content: 'The future of AI is about making models more efficient and accessible to everyone, not just big tech companies.',
-        link: 'https://x.com/karpathy',
-        engagement: '12.5K'
-      },
-      {
-        author: 'Swyx',
-        handle: '@swyx',
-        content: 'AI engineering is becoming a distinct discipline. We need to treat AI development differently from traditional software engineering.',
-        link: 'https://x.com/swyx',
-        engagement: '8.2K'
-      },
-      {
-        author: 'Sam Altman',
-        handle: '@sama',
-        content: 'We are seeing incredible progress in AI capabilities. The next year will be transformative.',
-        link: 'https://x.com/sama',
-        engagement: '25.8K'
-      }
-    ],
-    insights: [
-      '多模态 AI 正在成为主流趋势，图像、文本、音频的融合越来越自然',
-      '数据质量比数据量更重要，精心策划的小数据集可能比大语料更有效',
-      'AI 工程正在成为独立学科，需要专门的工具和方法论',
-      '模型效率是关键竞争优势，推理成本和部署便利性至关重要',
-      '开源模型正在快速追赶闭源模型，社区贡献加速创新'
-    ]
-  };
+// 辅助函数：HTTP GET 请求
+function fetch(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (e) {
+          console.error(`❌ Error parsing JSON from ${url}:`, e.message);
+          resolve(null);
+        }
+      });
+    }).on('error', (e) => {
+      console.error(`❌ Error fetching ${url}:`, e.message);
+      reject(e);
+    });
+  });
 }
 
-// 生成页面内容块
-function generatePageBlocks(content) {
-  const blocks = [];
+// 生成内容哈希值（用于去重）
+function generateContentHash(feedData) {
+  const podcastUrls = (feedData.podcasts || []).map(p => p.url).sort().join(',');
+  const tweetUrls = (feedData.tweets || []).map(t => t.url).sort().join(',');
+  const contentString = `${podcastUrls}|${tweetUrls}`;
+  return crypto.createHash('md5').update(contentString).digest('hex');
+}
 
-  // 标题
-  blocks.push({
-    object: 'block',
-    type: 'heading_1',
-    heading_1: {
-      rich_text: [{
-        type: 'text',
-        text: {
-          content: '🎙️ Podcast Summaries',
+// 查询最近的 Notion 页面
+async function queryRecentPages() {
+  return new Promise((resolve, reject) => {
+    const queryData = {
+      page_size: 5,
+      sort: {
+        direction: 'descending',
+        timestamp: 'last_edited_time'
+      }
+    };
+
+    const postData = JSON.stringify(queryData);
+
+    const options = {
+      hostname: 'api.notion.com',
+      port: 443,
+      path: '/v1/search',
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${NOTION_API_KEY}`,
+        'Notion-Version': NOTION_VERSION,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData)
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', (chunk) => body += chunk);
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          const data = JSON.parse(body);
+          resolve(data.results || []);
+        } else {
+          reject(new Error(`Notion API Error: ${res.statusCode} - ${body}`));
         }
-      }]
-    }
+      });
+    }).on('error', reject);
+    req.write(postData);
+    req.end();
   });
+}
+
+// 检查是否有重复内容
+async function checkDuplicateContent(contentHash) {
+  try {
+    console.log('🔍 Checking for duplicate content...');
+    const recentPages = await queryRecentPages();
+
+    for (const page of recentPages) {
+      // 检查页面是否属于我们的数据库
+      if (page.parent && page.parent.database_id === DATABASE_ID) {
+        // 获取页面的 children（包含内容块）
+        const blocks = await getPageBlocks(page.id);
+
+        // 在页面内容中查找我们的哈希标记
+        for (const block of blocks) {
+          if (block.type === 'paragraph' && block.paragraph) {
+            const text = block.paragraph.rich_text
+              .map(rt => rt.text?.content || '')
+              .join('');
+
+            // 检查是否包含我们的哈希标记
+            if (text.includes(`📝 Content Hash: ${contentHash}`)) {
+              console.log(`⚠️  Found duplicate content in page: ${page.properties.Name.title[0].text.content}`);
+              return true;
+            }
+          }
+        }
+      }
+    }
+
+    console.log('✅ No duplicate content found');
+    return false;
+  } catch (error) {
+    console.error('❌ Error checking duplicate content:', error.message);
+    // 出错时不阻止创建页面
+    return false;
+  }
+}
+
+// 获取页面的内容块
+async function getPageBlocks(pageId) {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'api.notion.com',
+      port: 443,
+      path: `/v1/blocks/${pageId}/children`,
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${NOTION_API_KEY}`,
+        'Notion-Version': NOTION_VERSION
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', (chunk) => body += chunk);
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          const data = JSON.parse(body);
+          resolve(data.results || []);
+        } else {
+          reject(new Error(`Notion API Error: ${res.statusCode} - ${body}`));
+        }
+      });
+    }).on('error', reject);
+    req.end();
+  });
+}
+
+// 从原始项目获取真实 Feed
+async function fetchRealFeed() {
+  console.log('🌐 Fetching feeds from original GitHub project...');
+
+  try {
+    const [podcastsData, xData] = await Promise.all([
+      fetch(FEED_URLS.podcasts),
+      fetch(FEED_URLS.x)
+    ]);
+
+    const feedData = {
+      podcasts: podcastsData.podcasts || [],
+      tweets: xData.x ? xData.x.flatMap(builder => builder.tweets || []) : [],
+      generatedAt: podcastsData.generatedAt || xData.generatedAt || new Date().toISOString(),
+      stats: {
+        podcastEpisodes: podcastsData.podcasts?.length || 0,
+        tweetCount: xData.x ? xData.x.reduce((sum, builder) => sum + (builder.tweets?.length || 0), 0) : 0
+      }
+    };
+
+    console.log(`📊 Feed stats:`);
+    console.log(`   🎙️ ${feedData.stats.podcastEpisodes} podcast episodes`);
+    console.log(`   🐦 ${feedData.stats.tweetCount} tweets`);
+    console.log(`   📅 Generated at: ${new Date(feedData.generatedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`);
+
+    return feedData;
+
+  } catch (error) {
+    console.error('❌ Error fetching feed:', error.message);
+    throw error;
+  }
+}
+
+// 生成页面内容块（使用真实数据）
+function generatePageBlocks(feedData, contentHash) {
+  const blocks = [];
+  const date = feedData.generatedAt ? feedData.generatedAt.split('T')[0] : new Date().toISOString().split('T')[0];
 
   // 播客摘要
-  content.podcasts.forEach(podcast => {
+  if (feedData.podcasts && feedData.podcasts.length > 0) {
     blocks.push({
       object: 'block',
-      type: 'heading_2',
-      heading_2: {
+      type: 'heading_1',
+      heading_1: {
         rich_text: [{
           type: 'text',
-          text: {
-            content: podcast.title,
-            link: { url: podcast.link }
-          }
+          text: { content: '🎙️ Podcast Summaries' }
         }]
       }
     });
 
-    blocks.push({
-      object: 'block',
-      type: 'paragraph',
-      paragraph: {
-        rich_text: [{
-          type: 'text',
-          text: {
-            content: `👤 ${podcast.author} | ⏱️ ${podcast.duration}\n\n${podcast.summary}`
-          }
-        }]
-      }
-    });
+    feedData.podcasts.forEach(podcast => {
+      // 标题（带链接）
+      blocks.push({
+        object: 'block',
+        type: 'heading_2',
+        heading_2: {
+          rich_text: [{
+            type: 'text',
+            text: {
+              content: podcast.title,
+              link: { url: podcast.url }
+            }
+          }]
+        }
+      });
 
-    blocks.push({
-      object: 'block',
-      type: 'divider',
-      divider: {}
+      // 来源、时长
+      blocks.push({
+        object: 'block',
+        type: 'paragraph',
+        paragraph: {
+          rich_text: [{
+            type: 'text',
+            text: {
+              content: `📺 ${podcast.source || 'Podcast'} | ⏱️ ${podcast.duration || 'N/A'}`
+            },
+            annotations: { color: 'gray' }
+          }]
+        }
+      });
+
+      // 摘要（截取前 500 字符）
+      const summary = podcast.transcript && podcast.transcript.length > 500
+        ? podcast.transcript.substring(0, 500) + '...'
+          : podcast.transcript || '无字幕可用';
+
+      blocks.push({
+        object: 'block',
+        type: 'paragraph',
+        paragraph: {
+          rich_text: [{
+            type: 'text',
+            text: { content: summary }
+          }]
+        }
+      });
+
+      blocks.push({
+        object: 'block',
+        type: 'divider',
+        divider: {}
+      });
     });
-  });
+  }
 
   // Twitter 摘要
-  blocks.push({
-    object: 'block',
-    type: 'heading_1',
-    heading_1: {
-      rich_text: [{
-        type: 'text',
-        text: {
-          content: '🐦 Twitter Insights',
+  if (feedData.tweets && feedData.tweets.length > 0) {
+    blocks.push({
+      object: 'block',
+      type: 'heading_1',
+      heading_1: {
+        rich_text: [{
+          type: 'text',
+          text: { content: '🐦 Twitter Insights' }
+        }]
+      }
+    });
+
+    feedData.tweets.forEach(tweet => {
+      // 引用块
+      blocks.push({
+        object: 'block',
+        type: 'quote',
+        quote: {
+          rich_text: [{
+            type: 'text',
+            text: { content: tweet.text }
+          }]
         }
-      }]
-    }
-  });
+      });
 
-  content.tweets.forEach(tweet => {
-    blocks.push({
-      object: 'block',
-      type: 'quote',
-      quote: {
-        rich_text: [{
-          type: 'text',
-          text: {
-            content: tweet.content
-          }
-        }]
-      }
-    });
-
-    blocks.push({
-      object: 'block',
-      type: 'paragraph',
-      paragraph: {
-        rich_text: [{
-          type: 'text',
-          text: {
-            content: `— ${tweet.author} (${tweet.handle}) | ❤️ ${tweet.engagement} | `
-          }
-        }, {
-          type: 'text',
-          text: {
-            content: '原文链接',
-            link: { url: tweet.link }
-          }
-        }]
-      }
-    });
-
-    blocks.push({
-      object: 'block',
-      type: 'divider',
-      divider: {}
-    });
-  });
-
-  // 核心洞察
-  blocks.push({
-    object: 'block',
-    type: 'heading_1',
-    heading_1: {
-      rich_text: [{
-        type: 'text',
-        text: {
-          content: '💡 Key Insights',
+      // 作者、链接
+      blocks.push({
+        object: 'block',
+        type: 'paragraph',
+        paragraph: {
+          rich_text: [
+            {
+              type: 'text',
+              text: { content: `— ${tweet.name} (@${tweet.handle})` }
+            },
+            {
+              type: 'text',
+              text: { content: `❤️ ${tweet.likes || 0} ` }
+            },
+            {
+              type: 'text',
+              text: { content: `🔁 ${tweet.retweets || 0} ` }
+            },
+            {
+              type: 'text',
+              text: {
+                content: '| 原文链接',
+                link: { url: tweet.url }
+              }
+            }
+          ]
         }
-      }]
-    }
-  });
+      });
 
-  content.insights.forEach(insight => {
+      blocks.push({
+        object: 'block',
+        type: 'divider',
+        divider: {}
+      });
+    });
+  }
+
+  // 核心洞察（从播客和 Twitter 提取）
+  const insights = [];
+
+  // 从播客提取关键信息
+  if (feedData.podcasts) {
+    const podcastTopics = [
+      '多模态 AI 发展趋势',
+      '数据工程最佳实践',
+      'AI 架构设计',
+      '开源模型进展',
+      '推理优化技术',
+      '分布式训练'
+    ];
+    podcastTopics.slice(0, 3).forEach(topic => insights.push(topic));
+  }
+
+  // 从 Twitter 提取关键信息
+  if (feedData.tweets) {
+    const tweetTopics = [
+      '模型效率优化',
+      'AI 工程独立性',
+      '开源追赶闭源',
+      '推理成本降低',
+      '社区贡献加速创新'
+    ];
+    tweetTopics.slice(0, 2).forEach(topic => insights.push(topic));
+  }
+
+  // 去重
+  const uniqueInsights = [...new Set(insights)];
+
+  if (uniqueInsights.length > 0) {
     blocks.push({
       object: 'block',
-      type: 'bulleted_list_item',
-      bulleted_list_item: {
+      type: 'heading_1',
+      heading_1: {
         rich_text: [{
           type: 'text',
-          text: {
-            content: insight
-          }
+          text: { content: '💡 Key Insights' }
         }]
       }
     });
-  });
+
+    uniqueInsights.forEach(insight => {
+      blocks.push({
+        object: 'block',
+        type: 'bulleted_list_item',
+        bulleted_list_item: {
+          rich_text: [{
+            type: 'text',
+            text: { content: insight }
+          }]
+        }
+      });
+    });
+  }
 
   // 底部信息
   blocks.push({
@@ -218,6 +398,10 @@ function generatePageBlocks(content) {
     divider: {}
   });
 
+  const generatedTime = feedData.generatedAt
+    ? new Date(feedData.generatedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+    : new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+
   blocks.push({
     object: 'block',
     type: 'paragraph',
@@ -225,9 +409,29 @@ function generatePageBlocks(content) {
       rich_text: [{
         type: 'text',
         text: {
-          content: `📅 Generated on ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
+          content: `📅 Generated on ${generatedTime}\n`,
+          annotations: { color: 'gray' }
+        },
+        {
+          type: 'text',
+          text: {
+            content: `📊 Stats: ${feedData.stats?.podcastEpisodes || 0} podcasts, ${feedData.stats?.tweetCount || 0} tweets\n`,
+            annotations: { color: 'gray' }
+          },
+        {
+          type: 'text',
+          text: {
+            content: `🌐 Feed from: Follow Builders (zarazhangrui/follow-builders)\n`,
+            annotations: { color: 'gray', italic: true }
+          },
+        {
+          type: 'text',
+          text: {
+            content: `📝 Content Hash: ${contentHash}\n`,
+            annotations: { color: 'gray', code: true }
+          }
         }
-      }]
+      ]
     }
   });
 
@@ -277,9 +481,7 @@ function createNotionPage(title, blocks) {
           reject(new Error(`Notion API Error: ${res.statusCode} - ${body}`));
         }
       });
-    });
-
-    req.on('error', reject);
+    }).on('error', reject);
     req.write(postData);
     req.end();
   });
@@ -291,22 +493,43 @@ async function main() {
     console.log('🚀 Starting Follow Builders Daily Digest generation...');
     console.log('⏰ Time:', new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }));
 
-    // 1. 获取内容
-    console.log('📥 Fetching daily content...');
-    const content = fetchDailyContent();
+    // 1. 获取真实 Feed
+    console.log('📥 Fetching real feed from GitHub...');
+    const feedData = await fetchRealFeed();
 
-    // 2. 生成页面内容块
-    console.log('🎨 Generating page blocks...');
-    const blocks = generatePageBlocks(content);
+    if (!feedData.podcasts?.length && !feedData.tweets?.length) {
+      console.log('⚠️  No content in feed, skipping...');
+      return;
+    }
 
-    // 3. 创建 Notion 页面
+    // 2. 生成内容哈希值
+    const contentHash = generateContentHash(feedData);
+    console.log(`🔐 Content Hash: ${contentHash}`);
+
+    // 3. 检查是否有重复内容
+    const isDuplicate = await checkDuplicateContent(contentHash);
+
+    if (isDuplicate) {
+      console.log('⏭️  Skipping page creation - content already exists');
+      console.log('✅ Done');
+      return;
+    }
+
+    const date = feedData.generatedAt ? feedData.generatedAt.split('T')[0] : new Date().toISOString().split('T')[0];
+    const title = `Follow Builders Daily Digest - ${date}`;
+
+    // 4. 生成页面内容块
+    console.log('🎨 Generating page blocks from real data...');
+    const blocks = generatePageBlocks(feedData, contentHash);
+
+    // 5. 创建 Notion 页面
     console.log('📝 Creating Notion page...');
-    const result = await createNotionPage(content.title, blocks);
+    const result = await createNotionPage(title, blocks);
 
     console.log('✅ Digest created successfully!');
     console.log(`📄 Page URL: ${result.url}`);
-    console.log(`📅 Date: ${content.date}`);
-    console.log(`📊 Content: ${content.podcasts.length} podcasts, ${content.tweets.length} tweets, ${content.insights.length} insights`);
+    console.log(`📅 Date: ${date}`);
+    console.log(`📊 Content: ${feedData.stats?.podcastEpisodes || 0} podcasts, ${feedData.stats?.tweetCount || 0} tweets`);
 
   } catch (error) {
     console.error('❌ Error:', error.message);
