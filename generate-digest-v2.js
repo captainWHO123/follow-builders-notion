@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Follow Builders Daily Digest Generator (V4 - With Content Deduplication)
- * 直接从 GitHub 原始项目获取真实 feed
- * 内容去重：如果内容和上次相同，不创建新页面
+ * Follow Builders Daily Digest Generator (V5 - Fixed Syntax)
+ * 修复 Node.js v20 语法错误
+ * 移除可选链，简化嵌套对象
  */
 
 const https = require('https');
@@ -113,7 +113,7 @@ async function checkDuplicateContent(contentHash) {
         for (const block of blocks) {
           if (block.type === 'paragraph' && block.paragraph) {
             const text = block.paragraph.rich_text
-              .map(rt => rt.text?.content || '')
+              .map(rt => rt.text ? rt.text.content : '')
               .join('');
 
             // 检查是否包含我们的哈希标记
@@ -180,8 +180,8 @@ async function fetchRealFeed() {
       tweets: xData.x ? xData.x.flatMap(builder => builder.tweets || []) : [],
       generatedAt: podcastsData.generatedAt || xData.generatedAt || new Date().toISOString(),
       stats: {
-        podcastEpisodes: podcastsData.podcasts?.length || 0,
-        tweetCount: xData.x ? xData.x.reduce((sum, builder) => sum + (builder.tweets?.length || 0), 0) : 0
+        podcastEpisodes: podcastsData.podcasts ? podcastsData.podcasts.length : 0,
+        tweetCount: xData.x ? xData.x.reduce((sum, builder) => sum + (builder.tweets ? builder.tweets.length : 0), 0) : 0
       }
     };
 
@@ -201,7 +201,7 @@ async function fetchRealFeed() {
 // 生成页面内容块（使用真实数据）
 function generatePageBlocks(feedData, contentHash) {
   const blocks = [];
-  const date = feedData.generatedAt ? feedData.generatedAt.split('T')[0] : new Date().toISOString().split('T')[0];
+  const date = feedData.generatedAt ? new Date(feedData.generatedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
 
   // 播客摘要
   if (feedData.podcasts && feedData.podcasts.length > 0) {
@@ -224,25 +224,21 @@ function generatePageBlocks(feedData, contentHash) {
         heading_2: {
           rich_text: [{
             type: 'text',
-            text: {
-              content: podcast.title,
-              link: { url: podcast.url }
-            }
+            text: { content: podcast.title }
           }]
         }
       });
 
       // 来源、时长
+      const source = podcast.source || 'Podcast';
+      const duration = podcast.duration || 'N/A';
       blocks.push({
         object: 'block',
         type: 'paragraph',
         paragraph: {
           rich_text: [{
             type: 'text',
-            text: {
-              content: `📺 ${podcast.source || 'Podcast'} | ⏱️ ${podcast.duration || 'N/A'}`
-            },
-            annotations: { color: 'gray' }
+            text: { content: `📺 ${source} | ⏱️ ${duration}` }
           }]
         }
       });
@@ -250,7 +246,7 @@ function generatePageBlocks(feedData, contentHash) {
       // 摘要（截取前 500 字符）
       const summary = podcast.transcript && podcast.transcript.length > 500
         ? podcast.transcript.substring(0, 500) + '...'
-          : podcast.transcript || '无字幕可用';
+        : podcast.transcript || '无字幕可用';
 
       blocks.push({
         object: 'block',
@@ -347,6 +343,7 @@ function generatePageBlocks(feedData, contentHash) {
       '推理优化技术',
       '分布式训练'
     ];
+
     podcastTopics.slice(0, 3).forEach(topic => insights.push(topic));
   }
 
@@ -402,36 +399,19 @@ function generatePageBlocks(feedData, contentHash) {
     ? new Date(feedData.generatedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
     : new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
 
+  // 构建底部段落
+  const richTextArray = [
+    { type: 'text', text: { content: `📅 Generated on ${generatedTime}\n` } },
+    { type: 'text', text: { content: `📊 Stats: ${feedData.stats.podcastEpisodes || 0} podcasts, ${feedData.stats.tweetCount || 0} tweets\n` } },
+    { type: 'text', text: { content: `🌐 Feed from: Follow Builders (zarazhangrui/follow-builders)\n` } },
+    { type: 'text', text: { content: `📝 Content Hash: ${contentHash}\n` } }
+  ];
+
   blocks.push({
     object: 'block',
     type: 'paragraph',
     paragraph: {
-      rich_text: [{
-        type: 'text',
-        text: {
-          content: `📅 Generated on ${generatedTime}\n`,
-          annotations: { color: 'gray' }
-        },
-        {
-          type: 'text',
-          text: {
-            content: `📊 Stats: ${feedData.stats?.podcastEpisodes || 0} podcasts, ${feedData.stats?.tweetCount || 0} tweets\n`,
-            annotations: { color: 'gray' }
-          },
-        {
-          type: 'text',
-          text: {
-            content: `🌐 Feed from: Follow Builders (zarazhangrui/follow-builders)\n`,
-            annotations: { color: 'gray', italic: true }
-          },
-        {
-          type: 'text',
-          text: {
-            content: `📝 Content Hash: ${contentHash}\n`,
-            annotations: { color: 'gray', code: true }
-          }
-        }
-      ]
+      rich_text: richTextArray
     }
   });
 
@@ -497,7 +477,7 @@ async function main() {
     console.log('📥 Fetching real feed from GitHub...');
     const feedData = await fetchRealFeed();
 
-    if (!feedData.podcasts?.length && !feedData.tweets?.length) {
+    if (!feedData.podcasts.length && !feedData.tweets.length) {
       console.log('⚠️  No content in feed, skipping...');
       return;
     }
@@ -529,7 +509,7 @@ async function main() {
     console.log('✅ Digest created successfully!');
     console.log(`📄 Page URL: ${result.url}`);
     console.log(`📅 Date: ${date}`);
-    console.log(`📊 Content: ${feedData.stats?.podcastEpisodes || 0} podcasts, ${feedData.stats?.tweetCount || 0} tweets`);
+    console.log(`📊 Content: ${feedData.stats.podcastEpisodes || 0} podcasts, ${feedData.stats.tweetCount || 0} tweets`);
 
   } catch (error) {
     console.error('❌ Error:', error.message);
